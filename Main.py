@@ -4,155 +4,249 @@ from tkinter.scrolledtext import ScrolledText
 from pathlib import Path
 import shutil
 import re
-import os
+from datetime import datetime
 from PIL import Image, ImageTk
 
 class FileRenamerPro(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Bulk Renamer")
-        self.geometry("1100x700")               # Wider for preview panel
+        self.title("File Renamer Pro")
+        self.geometry("1300x800")
         self.current_folder = None
-        self.file_objects = []
+        self.file_objects = []          # list of Path objects
+        self.file_vars = []             # list of BooleanVar for checkboxes
         self.overwrite_all = None
-        self.current_preview_image = None       # keep reference to PhotoImage
+        self.current_preview_image = None
+        self.sort_column = "name"
+        self.sort_reverse = False
         self.setup_ui()
         self.setup_bindings()
         self.set_default_values()
 
     def set_default_values(self):
+        self.base_entry.delete(0, tk.END)
         self.base_entry.insert(0, "")
         self.start_spin.set(1)
-        self.padding_combo.current(1)           # "01"
+        self.padding_combo.current(1)   # "01"
+        self.suffix_entry.delete(0, tk.END)
         self.suffix_entry.insert(0, "")
+        self.case_combo.current(0)      # "Keep original"
+        self.apply_ext_var.set(True)
 
     def setup_ui(self):
-        main_frame = ttk.Frame(self)
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # ---- Main vertical PanedWindow (top + bottom) ----
+        main_vpaned = ttk.PanedWindow(self, orient=tk.VERTICAL)
+        main_vpaned.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # Folder selection (unchanged)
-        folder_frame = ttk.LabelFrame(main_frame, text="Folder Selection")
-        folder_frame.pack(fill=tk.X, pady=5)
+        # ========== TOP PART: File list (left) + Naming options & preview (right) ==========
+        top_paned = ttk.PanedWindow(main_vpaned, orient=tk.HORIZONTAL)
+        main_vpaned.add(top_paned, weight=3)
 
-        self.btn_folder = ttk.Button(folder_frame, text="Select Folder", command=self.load_folder)
-        self.btn_folder.pack(side=tk.LEFT, padx=5)
-        self.btn_clear_folder = ttk.Button(folder_frame, text="Clear Folder", command=self.clear_folder)
-        self.btn_clear_folder.pack(side=tk.LEFT, padx=5)
-        self.lbl_folder = ttk.Label(folder_frame, text="No folder selected")
-        self.lbl_folder.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        # ----- LEFT: File list with metadata + reorder buttons -----
+        left_container = ttk.Frame(top_paned)
+        top_paned.add(left_container, weight=2)
 
-        # Naming options (unchanged)
-        options_frame = ttk.LabelFrame(main_frame, text="Naming Options")
-        options_frame.pack(fill=tk.X, pady=5)
+        file_frame = ttk.LabelFrame(left_container, text="Files (click to preview)")
+        file_frame.pack(fill=tk.BOTH, expand=True)
 
-        ttk.Label(options_frame, text="Base Name:").grid(row=0, column=0, sticky=tk.W)
-        self.base_entry = ttk.Entry(options_frame)
-        self.base_entry.grid(row=0, column=1, padx=5, sticky=tk.EW)
+        # Treeview with checkboxes
+        columns = ("select", "name", "type", "modified", "size")
+        self.file_tree = ttk.Treeview(file_frame, columns=columns, show="headings", height=20)
+        self.file_tree.heading("select", text="✓", command=lambda: self.toggle_all())
+        self.file_tree.heading("name", text="Name", command=lambda: self.sort_by_column("name"))
+        self.file_tree.heading("type", text="Type", command=lambda: self.sort_by_column("type"))
+        self.file_tree.heading("modified", text="Modified", command=lambda: self.sort_by_column("modified"))
+        self.file_tree.heading("size", text="Size", command=lambda: self.sort_by_column("size"))
+        self.file_tree.column("select", width=40, anchor="center")
+        self.file_tree.column("name", width=200)
+        self.file_tree.column("type", width=80)
+        self.file_tree.column("modified", width=120)
+        self.file_tree.column("size", width=100)
 
-        ttk.Label(options_frame, text="Start Number:").grid(row=0, column=2, sticky=tk.W)
-        self.start_spin = ttk.Spinbox(options_frame, from_=1, to=9999, width=5, validate="key",
-                                    validatecommand=(self.register(self.validate_number), '%P'))
-        self.start_spin.grid(row=0, column=3, padx=5)
+        tree_scroll = ttk.Scrollbar(file_frame, orient=tk.VERTICAL, command=self.file_tree.yview)
+        self.file_tree.configure(yscrollcommand=tree_scroll.set)
+        self.file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        ttk.Label(options_frame, text="Padding:").grid(row=0, column=4, sticky=tk.W)
-        self.padding_combo = ttk.Combobox(options_frame, values=["1", "01", "001", "0001"], width=5)
-        self.padding_combo.grid(row=0, column=5, padx=5)
+        # Reorder buttons frame
+        btn_order_frame = ttk.Frame(left_container)
+        btn_order_frame.pack(fill=tk.X, pady=5)
+        ttk.Button(btn_order_frame, text="⬆ Move Up", command=self.move_up).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_order_frame, text="⬇ Move Down", command=self.move_down).pack(side=tk.LEFT, padx=2)
+        ttk.Label(btn_order_frame, text="Double-click to move", foreground="gray").pack(side=tk.RIGHT, padx=2)
 
-        ttk.Label(options_frame, text="Text After Number:").grid(row=1, column=0, sticky=tk.W)
-        self.suffix_entry = ttk.Entry(options_frame)
-        self.suffix_entry.grid(row=1, column=1, columnspan=5, padx=5, sticky=tk.EW)
+        # ----- RIGHT: Naming options + side-by-side preview -----
+        right_paned = ttk.PanedWindow(top_paned, orient=tk.VERTICAL)
+        top_paned.add(right_paned, weight=1)
+
+        # Naming options frame
+        options_frame = ttk.LabelFrame(right_paned, text="Naming Options")
+        right_paned.add(options_frame, weight=1)
+
+        ttk.Label(options_frame, text="Rename Mode:").grid(row=0, column=0, sticky=tk.W, padx=5, pady=2)
+        self.mode_label = ttk.Label(options_frame, text="Sequential Naming", font=("", 10, "bold"))
+        self.mode_label.grid(row=0, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(options_frame, text="Base Name:").grid(row=1, column=0, sticky=tk.W, padx=5, pady=2)
+        self.base_entry = ttk.Entry(options_frame, width=25)
+        self.base_entry.grid(row=1, column=1, padx=5, pady=2, sticky=tk.EW)
+
+        ttk.Label(options_frame, text="Start Number:").grid(row=2, column=0, sticky=tk.W, padx=5, pady=2)
+        self.start_spin = ttk.Spinbox(options_frame, from_=1, to=9999, width=8, validate="key",
+                                      validatecommand=(self.register(self.validate_number), '%P'))
+        self.start_spin.grid(row=2, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(options_frame, text="Padding:").grid(row=3, column=0, sticky=tk.W, padx=5, pady=2)
+        self.padding_combo = ttk.Combobox(options_frame, values=["1", "01", "001", "0001"], width=8)
+        self.padding_combo.grid(row=3, column=1, sticky=tk.W, padx=5)
+
+        ttk.Label(options_frame, text="Suffix:").grid(row=4, column=0, sticky=tk.W, padx=5, pady=2)
+        self.suffix_entry = ttk.Entry(options_frame, width=25)
+        self.suffix_entry.grid(row=4, column=1, padx=5, pady=2, sticky=tk.EW)
+
+        ttk.Label(options_frame, text="Case:").grid(row=5, column=0, sticky=tk.W, padx=5, pady=2)
+        self.case_combo = ttk.Combobox(options_frame, values=["Keep original", "lowercase", "UPPERCASE", "Capitalize"], width=15)
+        self.case_combo.grid(row=5, column=1, sticky=tk.W, padx=5)
+        self.case_combo.current(0)
+
+        self.apply_ext_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(options_frame, text="Apply to Filename & Extension", variable=self.apply_ext_var).grid(row=6, column=0, columnspan=2, sticky=tk.W, padx=5, pady=5)
 
         options_frame.grid_columnconfigure(1, weight=1)
 
-        # ---- Main area: file list + preview panel (PanedWindow) ----
-        paned = ttk.PanedWindow(main_frame, orient=tk.HORIZONTAL)
-        paned.pack(fill=tk.BOTH, expand=True, pady=5)
+        # Side‑by‑side preview (canvas + info text)
+        preview_frame = ttk.LabelFrame(right_paned, text="Preview (click any file)")
+        right_paned.add(preview_frame, weight=1)
 
-        # Left: file list frame
-        list_frame = ttk.LabelFrame(paned, text="Files (Drag to Reorder)")
-        paned.add(list_frame, weight=2)
+        preview_paned = ttk.PanedWindow(preview_frame, orient=tk.HORIZONTAL)
+        preview_paned.pack(fill=tk.BOTH, expand=True)
 
-        self.file_list = tk.Listbox(list_frame, selectmode=tk.SINGLE, activestyle="none")
-        self.file_list.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.preview_canvas = tk.Canvas(preview_paned, bg="#f0f0f0", width=150, height=150, relief=tk.SUNKEN)
+        preview_paned.add(self.preview_canvas, weight=1)
 
-        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.file_list.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.file_list.config(yscrollcommand=scrollbar.set)
+        self.preview_info = tk.Text(preview_paned, wrap=tk.WORD, font=("TkFixedFont", 8))
+        preview_paned.add(self.preview_info, weight=2)
+        info_scroll = ttk.Scrollbar(self.preview_info, orient=tk.VERTICAL, command=self.preview_info.yview)
+        self.preview_info.configure(yscrollcommand=info_scroll.set)
+        info_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Right: preview panel
-        preview_container = ttk.LabelFrame(paned, text="Preview")
-        paned.add(preview_container, weight=1)
+        # ========== BOTTOM PART: Live preview table + status bar ==========
+        bottom_frame = ttk.LabelFrame(main_vpaned, text="Live Preview (original → new)")
+        main_vpaned.add(bottom_frame, weight=1)
 
-        # Canvas for image preview
-        self.preview_canvas = tk.Canvas(preview_container, bg="#f0f0f0", height=200, relief=tk.SUNKEN)
-        self.preview_canvas.pack(fill=tk.X, padx=5, pady=5)
+        # Preview table
+        columns = ("original", "new")
+        self.preview_table = ttk.Treeview(bottom_frame, columns=columns, show="headings", height=6)
+        self.preview_table.heading("original", text="Original Name")
+        self.preview_table.heading("new", text="New Name")
+        self.preview_table.column("original", width=300)
+        self.preview_table.column("new", width=300)
+        self.preview_table.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # Label for text info (folder contents, metadata, errors)
-        self.preview_info = tk.Text(preview_container, wrap=tk.WORD, height=10, font=("TkFixedFont", 9))
-        self.preview_info.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        scroll_info = ttk.Scrollbar(preview_container, orient=tk.VERTICAL, command=self.preview_info.yview)
-        scroll_info.pack(side=tk.RIGHT, fill=tk.Y)
-        self.preview_info.config(yscrollcommand=scroll_info.set)
-        # ----------
+        table_scroll = ttk.Scrollbar(bottom_frame, orient=tk.VERTICAL, command=self.preview_table.yview)
+        table_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.preview_table.configure(yscrollcommand=table_scroll.set)
 
-        # Preview of new names (unchanged, but below PanedWindow)
-        preview_frame = ttk.LabelFrame(main_frame, text="Rename Preview")
-        preview_frame.pack(fill=tk.X, pady=5)
+        # Status bar + control buttons
+        status_frame = ttk.Frame(bottom_frame)
+        status_frame.pack(fill=tk.X, pady=5)
+        self.status_label = ttk.Label(status_frame, text="No folder selected", foreground="blue")
+        self.status_label.pack(side=tk.LEFT)
+        self.progress_label = ttk.Label(status_frame, text="", foreground="green")
+        self.progress_label.pack(side=tk.RIGHT)
 
-        text_frame = ttk.Frame(preview_frame)
-        text_frame.pack(fill=tk.BOTH, expand=True)
-
-        self.preview_text = tk.Text(text_frame, height=4, wrap=tk.NONE)
-        self.preview_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        v_scroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.preview_text.yview)
-        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        h_scroll = ttk.Scrollbar(preview_frame, orient=tk.HORIZONTAL, command=self.preview_text.xview)
-        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
-        self.preview_text.config(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
-
-        # Status bar
-        self.status_label = ttk.Label(main_frame, foreground="red")
-        self.status_label.pack(pady=5)
-
-        # Buttons
-        btn_frame = ttk.Frame(main_frame)
+        btn_frame = ttk.Frame(bottom_frame)
         btn_frame.pack(fill=tk.X, pady=5)
-
-        self.btn_rename = ttk.Button(btn_frame, text="Rename Files", command=self.rename_files)
-        self.btn_rename.pack(side=tk.LEFT, padx=5)
-        self.btn_refresh = ttk.Button(btn_frame, text="Refresh List", command=self.refresh_file_list)
-        self.btn_refresh.pack(side=tk.LEFT, padx=5)
-        self.btn_clear = ttk.Button(btn_frame, text="Clear All", command=self.reset_app)
-        self.btn_clear.pack(side=tk.RIGHT, padx=5)
+        ttk.Button(btn_frame, text="📂 Select Folder", command=self.load_folder).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🔄 Refresh", command=self.refresh_file_list).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🏷️ Rename Selected", command=self.rename_files).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="🗑️ Clear All", command=self.reset_app).pack(side=tk.RIGHT, padx=5)
 
     def setup_bindings(self):
-        self.file_list.bind("<Button-1>", self.start_drag)
-        self.file_list.bind("<B1-Motion>", self.on_drag)
-        self.file_list.bind("<<ListboxSelect>>", self.on_file_select)
-        for entry in [self.base_entry, self.start_spin, self.padding_combo, self.suffix_entry]:
-            entry.bind("<KeyRelease>", lambda e: self.update_preview())
+        self.base_entry.bind("<KeyRelease>", lambda e: self.update_preview())
+        self.start_spin.bind("<KeyRelease>", lambda e: self.update_preview())
+        self.padding_combo.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
+        self.suffix_entry.bind("<KeyRelease>", lambda e: self.update_preview())
+        self.case_combo.bind("<<ComboboxSelected>>", lambda e: self.update_preview())
+        self.apply_ext_var.trace_add("write", lambda *_: self.update_preview())
+        # Click on tree row -> show preview
+        self.file_tree.bind("<ButtonRelease-1>", self.on_tree_click)
+        # Double-click on tree row -> move up (optional reorder)
+        self.file_tree.bind("<Double-1>", self.double_click_move)
 
-    # -----------------------------------------------------------------
-    # Existing methods (validators, drag&drop, generate names, etc.)
-    # -----------------------------------------------------------------
+    # ---------------------------- Sorting & Reordering ----------------------------
+    def sort_by_column(self, col):
+        """Sort file_objects and file_vars by column and refresh list."""
+        self.sort_reverse = (self.sort_column == col and not self.sort_reverse)
+        self.sort_column = col
+        
+        # Zip them to keep selection states with the files
+        combined = list(zip(self.file_objects, self.file_vars))
+        
+        if col == "name":
+            combined.sort(key=lambda pair: self.natural_sort_key(pair[0].name), reverse=self.sort_reverse)
+        elif col == "type":
+            combined.sort(key=lambda pair: pair[0].suffix.lower(), reverse=self.sort_reverse)
+        elif col == "modified":
+            combined.sort(key=lambda pair: pair[0].stat().st_mtime, reverse=self.sort_reverse)
+        elif col == "size":
+            combined.sort(key=lambda pair: pair[0].stat().st_size, reverse=self.sort_reverse)
+            
+        # Unzip back
+        self.file_objects, self.file_vars = map(list, zip(*combined)) if combined else ([], [])
+        
+        # Re-render UI (do not fetch from disk as we just sorted the existing list)
+        self.refresh_file_list(fetch_from_disk=False)
+
+    def move_up(self):
+        """Move selected file one position up in the list."""
+        selected = self.file_tree.selection()
+        if not selected:
+            return
+        # Get the index from the tag
+        idx = int(self.file_tree.item(selected[0], "tags")[0])
+        if idx > 0:
+            # Swap in data lists
+            self.file_objects[idx], self.file_objects[idx-1] = self.file_objects[idx-1], self.file_objects[idx]
+            self.file_vars[idx], self.file_vars[idx-1] = self.file_vars[idx-1], self.file_vars[idx]
+            # Update UI without re-fetching from disk
+            self.refresh_file_list(fetch_from_disk=False, select_idx=idx-1)
+
+    def move_down(self):
+        selected = self.file_tree.selection()
+        if not selected:
+            return
+        idx = int(self.file_tree.item(selected[0], "tags")[0])
+        if idx < len(self.file_objects)-1:
+            self.file_objects[idx], self.file_objects[idx+1] = self.file_objects[idx+1], self.file_objects[idx]
+            self.file_vars[idx], self.file_vars[idx+1] = self.file_vars[idx+1], self.file_vars[idx]
+            self.refresh_file_list(fetch_from_disk=False, select_idx=idx+1)
+
+    def double_click_move(self, event):
+        """Double-click moves file up."""
+        self.move_up()
+
+    def toggle_all(self):
+        """Select/deselect all files."""
+        select_all = not all(var.get() for var in self.file_vars)
+        for var in self.file_vars:
+            var.set(select_all)
+        self.refresh_file_list(keep_selection=True)
+        self.update_preview()
+
+    # ---------------------------- File loading & display ----------------------------
     def validate_number(self, value):
-        if value == "" or value.isdigit():
-            self.clear_status()
-            return True
-        self.show_status("Only numbers allowed in start field!")
-        return False
-
-    def show_status(self, message):
-        self.status_label.config(text=message)
-        self.after(5000, self.clear_status)
-
-    def clear_status(self):
-        self.status_label.config(text="")
+        return value == "" or value.isdigit()
 
     def natural_sort_key(self, s):
-        return [int(text) if text.isdigit() else text.lower()
-                for text in re.split(r"(\d+)", str(s))]
+        return [int(text) if text.isdigit() else text.lower() for text in re.split(r"(\d+)", str(s))]
+
+    def human_readable_size(self, size_bytes):
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
 
     def load_folder(self):
         folder = filedialog.askdirectory()
@@ -160,48 +254,114 @@ class FileRenamerPro(tk.Tk):
             self.current_folder = Path(folder)
             self.refresh_file_list()
 
-    def refresh_file_list(self):
-        if self.current_folder:
-            try:
-                self.file_objects = sorted(self.current_folder.iterdir(),
-                                           key=lambda x: self.natural_sort_key(x.name))
-                self.lbl_folder.config(text=str(self.current_folder))
-                self.update_file_list()
-            except PermissionError:
-                self.show_status("Permission denied to access folder!")
+    def refresh_file_list(self, fetch_from_disk=True, select_idx=None):
+        if not self.current_folder:
+            return
+        try:
+            if fetch_from_disk:
+                all_files = sorted(self.current_folder.iterdir(), key=lambda x: self.natural_sort_key(x.name))
+                self.file_objects = [f for f in all_files if f.is_file()]
+                self.file_vars = [tk.BooleanVar(value=True) for _ in self.file_objects]
 
-    def clear_folder(self):
-        self.current_folder = None
-        self.file_objects = []
-        self.lbl_folder.config(text="No folder selected")
-        self.file_list.delete(0, tk.END)
-        self.update_preview()
-        self.clear_preview()
-
-    def update_file_list(self):
-        self.file_list.delete(0, tk.END)
-        for f in self.file_objects:
-            self.file_list.insert(tk.END, f.name)
-        self.update_preview()
-
-    def start_drag(self, event):
-        self.drag_index = self.file_list.nearest(event.y)
-        self.file_list.selection_clear(0, tk.END)
-        self.file_list.selection_set(self.drag_index)
-
-    def on_drag(self, event):
-        new_index = self.file_list.nearest(event.y)
-        if new_index != self.drag_index and 0 <= new_index < self.file_list.size():
-            item = self.file_list.get(self.drag_index)
-            self.file_list.delete(self.drag_index)
-            self.file_list.insert(new_index, item)
-
-            obj = self.file_objects.pop(self.drag_index)
-            self.file_objects.insert(new_index, obj)
-
-            self.drag_index = new_index
-            self.file_list.selection_set(new_index)
+            self.file_tree.delete(*self.file_tree.get_children())
+            total_size = 0
+            for i, f in enumerate(self.file_objects):
+                total_size += f.stat().st_size
+                mod_time = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+                size_str = self.human_readable_size(f.stat().st_size)
+                ext = f.suffix[1:] if f.suffix else "file"
+                check_mark = "✓" if (i < len(self.file_vars) and self.file_vars[i].get()) else " "
+                
+                # Determine icon based on type
+                icon = "📄 " if f.is_file() else "📁 "
+                display_name = icon + f.name
+                
+                self.file_tree.insert("", "end", values=(check_mark, display_name, ext, mod_time, size_str), tags=(str(i),))
+            
+            self.status_label.config(text=f"Selected Folder: {self.current_folder}  |  {len(self.file_objects)} files, {self.human_readable_size(total_size)}")
+            
+            if select_idx is not None and select_idx < len(self.file_objects):
+                children = self.file_tree.get_children()
+                if children:
+                    item = children[select_idx]
+                    self.file_tree.selection_set(item)
+                    self.file_tree.see(item)
             self.update_preview()
+        except PermissionError:
+            messagebox.showerror("Error", "Permission denied to access folder")
+
+    def on_tree_click(self, event):
+        region = self.file_tree.identify_region(event.x, event.y)
+        if region == "cell":
+            column = self.file_tree.identify_column(event.x)
+            if column == "#1":   # checkbox column
+                item = self.file_tree.identify_row(event.y)
+                if item:
+                    idx = int(self.file_tree.item(item, "tags")[0])
+                    new_val = not self.file_vars[idx].get()
+                    self.file_vars[idx].set(new_val)
+                    self.file_tree.set(item, "select", "✓" if new_val else " ")
+                    self.update_preview()
+                return
+        # Click on any other part of the row -> show preview
+        item = self.file_tree.identify_row(event.y)
+        if item:
+            idx = int(self.file_tree.item(item, "tags")[0])
+            self.show_preview(self.file_objects[idx])
+
+    # ---------------------------- Preview (image / folder / file) ----------------------------
+    def show_preview(self, path):
+        self.preview_canvas.delete("all")
+        self.preview_info.config(state=tk.NORMAL)
+        self.preview_info.delete(1.0, tk.END)
+
+        if path.is_dir():
+            self.preview_info.insert(tk.END, f"📁 FOLDER: {path.name}\n\n")
+            try:
+                items = list(path.iterdir())[:15]
+                for i in items:
+                    self.preview_info.insert(tk.END, f"• {i.name}\n")
+                if len(list(path.iterdir())) > 15:
+                    self.preview_info.insert(tk.END, "...")
+            except:
+                self.preview_info.insert(tk.END, "Permission denied")
+        elif path.suffix.lower() in {'.jpg','.jpeg','.png','.gif','.bmp','.tiff','.webp'}:
+            try:
+                img = Image.open(path)
+                img.thumbnail((140, 140), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+                self.preview_canvas.create_image(70, 70, image=photo, anchor="center")
+                self.current_preview_image = photo
+                self.preview_info.insert(tk.END, f"🖼️ IMAGE: {path.name}\n")
+                self.preview_info.insert(tk.END, f"Dimensions: {img.width}×{img.height}\n")
+                self.preview_info.insert(tk.END, f"Size: {self.human_readable_size(path.stat().st_size)}")
+            except Exception as e:
+                self.preview_info.insert(tk.END, f"Error: {e}")
+        else:
+            stat = path.stat()
+            self.preview_info.insert(tk.END, f"📄 FILE: {path.name}\n")
+            self.preview_info.insert(tk.END, f"Type: {path.suffix or 'none'}\n")
+            self.preview_info.insert(tk.END, f"Size: {self.human_readable_size(stat.st_size)}\n")
+            self.preview_info.insert(tk.END, f"Modified: {datetime.fromtimestamp(stat.st_mtime).strftime('%Y-%m-%d %H:%M')}")
+        self.preview_info.config(state=tk.DISABLED)
+
+    def clear_preview(self):
+        self.preview_canvas.delete("all")
+        self.preview_info.config(state=tk.NORMAL)
+        self.preview_info.delete(1.0, tk.END)
+        self.preview_info.insert(tk.END, "Select a file to preview")
+        self.preview_info.config(state=tk.DISABLED)
+
+    # ---------------------------- Naming & Live Preview ----------------------------
+    def apply_case(self, name):
+        case = self.case_combo.get()
+        if case == "lowercase":
+            return name.lower()
+        elif case == "UPPERCASE":
+            return name.upper()
+        elif case == "Capitalize":
+            return name.capitalize()
+        return name
 
     def generate_new_name(self, index, path):
         base = self.base_entry.get().strip()
@@ -211,236 +371,123 @@ class FileRenamerPro(tk.Tk):
         suffix = self.suffix_entry.get().strip()
         number = start_num + index
         formatted_num = f"{number:0{width}d}"
-        return f"{base}{formatted_num}{suffix}{path.suffix}"
+        stem = f"{base}{formatted_num}{suffix}"
+        new_name = stem + path.suffix
+        return self.apply_case(new_name)
 
     def update_preview(self):
-        self.preview_text.config(state=tk.NORMAL)
-        self.preview_text.delete(1.0, tk.END)
+        for item in self.preview_table.get_children():
+            self.preview_table.delete(item)
+        selected_indices = [i for i, var in enumerate(self.file_vars) if var.get()]
+        total_selected = len(selected_indices)
+        if total_selected > 50:
+            self.preview_table.insert("", "end", values=(f"... {total_selected} files selected (preview limited to 50)", ""))
+            selected_indices = selected_indices[:50]
+        new_names = []
+        for seq, i in enumerate(selected_indices):
+            new_name = self.generate_new_name(seq, self.file_objects[i])
+            new_names.append(new_name)
+            self.preview_table.insert("", "end", values=(self.file_objects[i].name, new_name))
+        for item in self.preview_table.get_children():
+            new = self.preview_table.item(item, "values")[1]
+            if new_names.count(new) > 1:
+                self.preview_table.tag_configure("duplicate", background="#ffcccc")
+                self.preview_table.item(item, tags=("duplicate",))
+        total_size = sum(self.file_objects[i].stat().st_size for i in selected_indices)
+        self.progress_label.config(text=f"{total_selected} files selected ({self.human_readable_size(total_size)}) | Processed: 0 | Errors: 0")
 
-        previews = []
-        for i, path in enumerate(self.file_objects):
-            new_name = self.generate_new_name(i, path)
-            previews.append(f"{path.name} → {new_name}")
-
-        new_names = [p.split(" → ")[1] for p in previews]
-        duplicates = {name for name in new_names if new_names.count(name) > 1}
-
-        for line in previews:
-            if line.split(" → ")[1] in duplicates:
-                self.preview_text.insert(tk.END, line + " ⚠\n", "warning")
-            else:
-                self.preview_text.insert(tk.END, line + "\n")
-
-        self.preview_text.tag_config("warning", foreground="red")
-        self.preview_text.see("1.0")
-        self.preview_text.config(state=tk.DISABLED)
-
-    # -----------------------------------------------------------------
-    # NEW: Preview panel (image / folder / info)
-    # -----------------------------------------------------------------
-    def on_file_select(self, event):
-        """Called when an item in the listbox is selected."""
-        sel = self.file_list.curselection()
-        if not sel:
-            return
-        index = sel[0]
-        path = self.file_objects[index]
-        self.show_preview(path)
-
-    def show_preview(self, path):
-        """Display preview based on file/directory type."""
-        # Clear previous content
-        self.preview_canvas.delete("all")
-        self.preview_info.config(state=tk.NORMAL)
-        self.preview_info.delete(1.0, tk.END)
-
-        # 1. Directory preview
-        if path.is_dir():
-            self.preview_info.insert(tk.END, f"📁 FOLDER: {path.name}\n\n")
-            try:
-                items = list(path.iterdir())
-                if not items:
-                    self.preview_info.insert(tk.END, "(empty folder)")
-                else:
-                    for i, item in enumerate(items[:10]):
-                        self.preview_info.insert(tk.END, f"• {item.name}\n")
-                    if len(items) > 10:
-                        self.preview_info.insert(tk.END, f"... and {len(items)-10} more")
-            except PermissionError:
-                self.preview_info.insert(tk.END, "Permission denied reading folder")
-            self.preview_info.config(state=tk.DISABLED)
-            return
-
-        # 2. Image preview
-        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
-        if path.suffix.lower() in image_extensions:
-            try:
-                img = Image.open(path)
-                # Resize to fit canvas (max 200x200)
-                img.thumbnail((200, 200), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(img)
-                self.preview_canvas.create_image(100, 100, image=photo, anchor="center")
-                self.current_preview_image = photo   # keep reference
-                # show metadata
-                info_text = (f"🖼️ IMAGE: {path.name}\n"
-                             f"Dimensions: {img.width} × {img.height}\n"
-                             f"Size: {path.stat().st_size:,} bytes")
-                self.preview_info.insert(tk.END, info_text)
-            except Exception as e:
-                self.preview_info.insert(tk.END, f"Error loading image:\n{str(e)}")
-            self.preview_info.config(state=tk.DISABLED)
-            return
-
-        # 3. Other files: show basic metadata
-        try:
-            stat = path.stat()
-            info = (f"📄 FILE: {path.name}\n"
-                    f"Type: {path.suffix or 'no extension'}\n"
-                    f"Size: {stat.st_size:,} bytes\n"
-                    f"Modified: {tk.Label().tk.call('clock', 'format', stat.st_mtime)}")
-            self.preview_info.insert(tk.END, info)
-        except Exception as e:
-            self.preview_info.insert(tk.END, f"Cannot read file info:\n{str(e)}")
-        self.preview_info.config(state=tk.DISABLED)
-
-    def clear_preview(self):
-        """Clear both canvas and text info."""
-        self.preview_canvas.delete("all")
-        self.preview_info.config(state=tk.NORMAL)
-        self.preview_info.delete(1.0, tk.END)
-        self.preview_info.insert(tk.END, "Select a file or folder to preview")
-        self.preview_info.config(state=tk.DISABLED)
-        self.current_preview_image = None
-
-    # -----------------------------------------------------------------
-    # Rename logic (with all previous fixes)
-    # -----------------------------------------------------------------
+    # ---------------------------- Renaming Logic ----------------------------
     def rename_files(self):
-        if not self.file_objects:
-            self.show_status("No files selected!")
+        selected = [(i, self.file_objects[i]) for i, var in enumerate(self.file_vars) if var.get()]
+        if not selected:
+            self.show_status("No files selected to rename")
             return
-
-        if len(self.file_objects) > 10:
-            if not messagebox.askyesno("Confirm Rename",
-                                       f"Are you sure you want to rename {len(self.file_objects)} files?"):
+        if len(selected) > 10:
+            if not messagebox.askyesno("Confirm Rename", f"Rename {len(selected)} files?"):
                 return
-
-        try:
-            start_num = int(self.start_spin.get())
-        except ValueError:
-            self.show_status("Invalid start number! Using 1")
-            start_num = 1
-            self.start_spin.set(1)
-
         self.overwrite_all = None
         processed = 0
         errors = []
-        cancel_operation = False
-
-        for i, path in enumerate(self.file_objects):
-            if cancel_operation:
+        cancel = False
+        for seq, (orig_idx, path) in enumerate(selected):
+            if cancel:
                 break
-
-            new_name = self.generate_new_name(i, path)
+            new_name = self.generate_new_name(seq, path)
             new_path = path.parent / new_name
-
             if new_path == path:
                 continue
-
             if new_path.exists():
                 if self.overwrite_all is None:
-                    response = self.ask_overwrite(new_name)
-                    if response == "cancel":
-                        cancel_operation = True
+                    resp = self.ask_overwrite(new_name)
+                    if resp == "cancel":
+                        cancel = True
                         continue
-                    elif response == "no":
+                    elif resp == "no":
                         continue
-                    elif response == "noall":
+                    elif resp == "noall":
                         self.overwrite_all = False
                         continue
-                    elif response == "yes":
+                    elif resp == "yes":
                         pass
-                    elif response == "yesall":
+                    elif resp == "yesall":
                         self.overwrite_all = True
                 elif not self.overwrite_all:
                     continue
-
             try:
                 shutil.move(str(path), str(new_path))
                 processed += 1
             except Exception as e:
                 errors.append(f"{path.name}: {str(e)}")
-
         if errors:
             self.show_error_dialog(errors)
-
-        if processed > 0 and not cancel_operation:
+        if processed:
             self.refresh_file_list()
-            self.show_status(f"Successfully processed {processed} files")
-        elif cancel_operation:
-            self.show_status("Operation cancelled by user")
-
-    def show_error_dialog(self, errors):
-        dialog = tk.Toplevel(self)
-        dialog.title("Processing Errors")
-        dialog.geometry("600x400")
-
-        wrapper = ttk.Frame(dialog)
-        wrapper.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-
-        lbl = ttk.Label(wrapper, text=f"Encountered {len(errors)} errors:")
-        lbl.pack(anchor=tk.W)
-
-        txt = ScrolledText(wrapper, wrap=tk.WORD, width=70, height=15)
-        txt.pack(fill=tk.BOTH, expand=True)
-
-        error_sample = "\n".join(errors[:20])
-        if len(errors) > 20:
-            error_sample += f"\n\n...and {len(errors)-20} more errors..."
-        txt.insert(tk.END, error_sample)
-        txt.config(state=tk.DISABLED)
-
-        btn = ttk.Button(wrapper, text="OK", command=dialog.destroy)
-        btn.pack(pady=5)
+            self.show_status(f"Renamed {processed} files")
+            self.progress_label.config(text=f"{len(selected)} files selected | Processed: {processed} | Errors: {len(errors)}")
+        else:
+            self.show_status("No files were renamed")
 
     def ask_overwrite(self, filename):
-        dialog = tk.Toplevel(self)
-        dialog.title("Overwrite File?")
-        dialog.transient(self)
-        dialog.grab_set()
-
-        msg = ttk.Label(dialog, text=f"File '{filename}' already exists. Overwrite?")
-        msg.pack(padx=20, pady=10)
-
-        btn_frame = ttk.Frame(dialog)
+        d = tk.Toplevel(self)
+        d.title("Overwrite")
+        d.transient(self)
+        d.grab_set()
+        tk.Label(d, text=f"'{filename}' exists. Overwrite?").pack(padx=20, pady=10)
+        btn_frame = ttk.Frame(d)
         btn_frame.pack(pady=10)
+        resp = {"val": "no"}
+        def set_res(v): resp["val"] = v; d.destroy()
+        ttk.Button(btn_frame, text="Yes", command=lambda: set_res("yes")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Yes to All", command=lambda: set_res("yesall")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="No", command=lambda: set_res("no")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="No to All", command=lambda: set_res("noall")).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=lambda: set_res("cancel")).pack(side=tk.LEFT, padx=5)
+        d.wait_window()
+        return resp["val"]
 
-        response = {"answer": "no"}
+    def show_error_dialog(self, errors):
+        d = tk.Toplevel(self)
+        d.title("Errors")
+        txt = ScrolledText(d, width=70, height=15)
+        txt.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        txt.insert(tk.END, "\n".join(errors[:50]))
+        txt.config(state=tk.DISABLED)
+        ttk.Button(d, text="OK", command=d.destroy).pack(pady=5)
 
-        def set_response(answer):
-            response["answer"] = answer
-            dialog.destroy()
-
-        ttk.Button(btn_frame, text="Yes", command=lambda: set_response("yes")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Yes to All", command=lambda: set_response("yesall")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="No", command=lambda: set_response("no")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="No to All", command=lambda: set_response("noall")).pack(side=tk.LEFT, padx=5)
-        ttk.Button(btn_frame, text="Cancel", command=lambda: set_response("cancel")).pack(side=tk.LEFT, padx=5)
-
-        dialog.wait_window()
-        return response["answer"]
+    def show_status(self, msg):
+        self.status_label.config(text=msg)
+        self.after(4000, lambda: self.status_label.config(text=f"Selected Folder: {self.current_folder or 'None'}"))
 
     def reset_app(self):
-        self.clear_folder()
-        self.base_entry.delete(0, tk.END)
-        self.start_spin.set(1)
-        self.padding_combo.current(1)
-        self.suffix_entry.delete(0, tk.END)
-        self.preview_text.config(state=tk.NORMAL)
-        self.preview_text.delete(1.0, tk.END)
-        self.preview_text.config(state=tk.DISABLED)
-        self.clear_status()
-
+        self.current_folder = None
+        self.file_objects.clear()
+        self.file_vars.clear()
+        self.file_tree.delete(*self.file_tree.get_children())
+        self.preview_table.delete(*self.preview_table.get_children())
+        self.set_default_values()
+        self.clear_preview()
+        self.status_label.config(text="No folder selected")
+        self.progress_label.config(text="")
 
 if __name__ == "__main__":
     app = FileRenamerPro()
