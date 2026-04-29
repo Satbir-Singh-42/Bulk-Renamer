@@ -9,7 +9,8 @@ Built with Python's Tkinter – runs on Windows, macOS, and Linux.
 
 - ✅ **Natural sorting** – numbers inside filenames are compared numerically (e.g., `file2` before `file10`)
 - ✅ **Drag & drop reordering** – change the sequence of files before renaming
-- ✅ **Live preview** – see new names instantly while typing; duplicate names are highlighted
+- ✅ **Preview Panel** – integrated panel showing image thumbnails, folder contents, and file metadata
+- ✅ **Live rename preview** – see new names instantly while typing; duplicate names are highlighted
 - ✅ **Flexible naming**:
   - Base name (optional)
   - Sequential number with custom start value
@@ -31,7 +32,12 @@ Built with Python's Tkinter – runs on Windows, macOS, and Linux.
    sudo apt-get install python3-tk
    ```
 
-3. **Run the application**:
+3. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Run the application**:
    ```bash
    python Main.py
    ```
@@ -58,4 +64,4 @@ Built with Python's Tkinter – runs on Windows, macOS, and Linux.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).# Bulk-Renamer
+This project is licensed under the [MIT License](LICENSE).
